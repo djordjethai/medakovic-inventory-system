@@ -9,6 +9,7 @@
 # Runtime inventory databases and backups
 inventory.dat
 inventory-archive.dat
+inventory-journal.dat
 inventory-before-reindex.dat
 inventory-*.bak
 

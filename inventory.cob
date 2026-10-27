@@ -18,6 +18,11 @@
                ACCESS MODE IS DYNAMIC
                RECORD KEY IS ARCHIVE-PRODUCT-ID
                FILE STATUS IS WS-ARCHIVE-STATUS.
+           SELECT JOURNAL-FILE ASSIGN TO "inventory-journal.dat"
+               ORGANIZATION IS INDEXED
+               ACCESS MODE IS DYNAMIC
+               RECORD KEY IS JOURNAL-SEQUENCE
+               FILE STATUS IS WS-JOURNAL-STATUS.
 
        DATA DIVISION.
        FILE SECTION.
@@ -39,11 +44,30 @@
                10 ARCHIVE-REORDER-LEVEL   PIC 9(6).
                10 ARCHIVE-UNIT-PRICE      PIC 9(7)V99.
            05 ARCHIVED-DATE               PIC X(8).
+       FD  JOURNAL-FILE.
+       01  JOURNAL-RECORD.
+           05 JOURNAL-SEQUENCE             PIC 9(10).
+           05 JOURNAL-TIMESTAMP            PIC X(14).
+           05 JOURNAL-PRODUCT-ID           PIC X(10).
+           05 JOURNAL-ACTION               PIC X(12).
+           05 JOURNAL-QTY-BEFORE           PIC 9(6).
+           05 JOURNAL-QTY-CHANGE-SIGN      PIC X.
+           05 JOURNAL-QTY-CHANGE           PIC 9(6).
+           05 JOURNAL-QTY-AFTER            PIC 9(6).
+           05 JOURNAL-NAME-BEFORE          PIC X(30).
+           05 JOURNAL-NAME-AFTER           PIC X(30).
+           05 JOURNAL-REORDER-BEFORE       PIC 9(6).
+           05 JOURNAL-REORDER-AFTER        PIC 9(6).
+           05 JOURNAL-PRICE-BEFORE         PIC 9(7)V99.
+           05 JOURNAL-TRANSACTION-PRICE    PIC 9(7)V99.
+           05 JOURNAL-PRICE-AFTER          PIC 9(7)V99.
+           05 JOURNAL-DETAIL               PIC X(40).
 
        WORKING-STORAGE SECTION.
        01  WS-FILE-STATUS             PIC XX.
        01  WS-EXPORT-STATUS           PIC XX.
        01  WS-ARCHIVE-STATUS          PIC XX.
+       01  WS-JOURNAL-STATUS          PIC XX.
        01  WS-CHOICE                  PIC X(2).
        01  WS-EXIT-FLAG               PIC X VALUE "N".
            88 EXIT-REQUESTED          VALUE "Y".
@@ -53,14 +77,24 @@
        01  WS-INPUT-ID                PIC X(10).
        01  WS-AMOUNT                  PIC 9(6).
        01  WS-NEW-QUANTITY            PIC 9(7).
+       01  WS-TRANSACTION-PRICE       PIC 9(7)V99.
+       01  WS-SALE-VALUE              PIC 9(13)V99.
        01  WS-ITEM-VALUE              PIC 9(13)V99.
        01  WS-TOTAL-VALUE             PIC 9(19)V99.
        01  WS-PRODUCT-COUNT           PIC 9(6).
        01  WS-LOW-STOCK-COUNT         PIC 9(6).
        01  WS-QUANTITY-DISPLAY        PIC ZZZ,ZZ9.
+       01  WS-QTY-BEFORE-DISPLAY      PIC ZZZ,ZZ9.
+       01  WS-QTY-AFTER-DISPLAY       PIC ZZZ,ZZ9.
+       01  WS-QTY-CHANGE-DISPLAY      PIC ZZZ,ZZ9.
        01  WS-REORDER-DISPLAY         PIC ZZZ,ZZ9.
+       01  WS-REORDER-BEFORE-DISPLAY  PIC ZZZ,ZZ9.
+       01  WS-REORDER-AFTER-DISPLAY   PIC ZZZ,ZZ9.
        01  WS-COUNT-DISPLAY           PIC ZZZ,ZZ9.
        01  WS-PRICE-DISPLAY           PIC Z,ZZZ,ZZ9.99.
+       01  WS-PRICE-BEFORE-DISPLAY    PIC Z,ZZZ,ZZ9.99.
+       01  WS-PRICE-AFTER-DISPLAY     PIC Z,ZZZ,ZZ9.99.
+       01  WS-TRANSACTION-DISPLAY     PIC Z,ZZZ,ZZ9.99.
        01  WS-VALUE-DISPLAY           PIC ZZZ,ZZZ,ZZZ,ZZ9.99.
        01  WS-TOTAL-DISPLAY           PIC ZZZ,ZZZ,ZZZ,ZZZ,ZZZ,ZZ9.99.
        01  WS-EXPORT-FAILED           PIC X VALUE "N".
@@ -76,6 +110,20 @@
            88 VALUE-PROVIDED          VALUE "Y".
        01  WS-VALID-INPUT             PIC X VALUE "N".
            88 VALID-INPUT             VALUE "Y".
+       01  WS-BEFORE-PRODUCT.
+           05 WS-BEFORE-ID            PIC X(10).
+           05 WS-BEFORE-NAME          PIC X(30).
+           05 WS-BEFORE-QUANTITY      PIC 9(6).
+           05 WS-BEFORE-REORDER       PIC 9(6).
+           05 WS-BEFORE-PRICE         PIC 9(7)V99.
+       01  WS-NEXT-JOURNAL-SEQUENCE   PIC 9(10) VALUE 1.
+       01  WS-JOURNAL-ACTION          PIC X(12).
+       01  WS-JOURNAL-CHANGE-SIGN     PIC X.
+       01  WS-JOURNAL-CHANGE          PIC 9(6).
+       01  WS-JOURNAL-DETAIL          PIC X(40).
+       01  WS-JOURNAL-WRITE-OK        PIC X VALUE "N".
+           88 JOURNAL-WRITE-OK        VALUE "Y".
+       01  WS-JOURNAL-MATCH-COUNT     PIC 9(6).
 
        PROCEDURE DIVISION.
        MAIN-PROCEDURE.
@@ -126,15 +174,23 @@
                        PERFORM CLEAR-SCREEN
                        PERFORM DISPLAY-ARCHIVE
                        PERFORM PAUSE-FOR-ENTER
+                   WHEN "11"
+                       PERFORM CLEAR-SCREEN
+                       PERFORM DISPLAY-JOURNAL-CHRONOLOGICAL
+                       PERFORM PAUSE-FOR-ENTER
+                   WHEN "12"
+                       PERFORM CLEAR-SCREEN
+                       PERFORM DISPLAY-JOURNAL-BY-PRODUCT
+                       PERFORM PAUSE-FOR-ENTER
                    WHEN "0"
                        SET EXIT-REQUESTED TO TRUE
                    WHEN OTHER
-                       DISPLAY "INVALID CHOICE. PLEASE ENTER 0 TO 10."
+                       DISPLAY "INVALID CHOICE. PLEASE ENTER 0 TO 12."
                        PERFORM PAUSE-FOR-ENTER
                END-EVALUATE
            END-PERFORM
 
-           CLOSE INVENTORY-FILE ARCHIVE-FILE
+           CLOSE INVENTORY-FILE ARCHIVE-FILE JOURNAL-FILE
            DISPLAY "GOODBYE!"
            GOBACK.
 
@@ -166,7 +222,21 @@
            END-IF
            IF WS-ARCHIVE-STATUS NOT = "00"
                PERFORM ARCHIVE-FILE-ERROR
-           END-IF.
+           END-IF
+
+           OPEN I-O JOURNAL-FILE
+           IF WS-JOURNAL-STATUS = "35"
+               OPEN OUTPUT JOURNAL-FILE
+               IF WS-JOURNAL-STATUS NOT = "00"
+                   PERFORM JOURNAL-FILE-ERROR
+               END-IF
+               CLOSE JOURNAL-FILE
+               OPEN I-O JOURNAL-FILE
+           END-IF
+           IF WS-JOURNAL-STATUS NOT = "00"
+               PERFORM JOURNAL-FILE-ERROR
+           END-IF
+           PERFORM INITIALIZE-JOURNAL-SEQUENCE.
 
        FILE-ERROR.
            DISPLAY "INVENTORY FILE ERROR. STATUS: " WS-FILE-STATUS
@@ -176,23 +246,23 @@
            DISPLAY "ARCHIVE FILE ERROR. STATUS: " WS-ARCHIVE-STATUS
            STOP RUN.
 
+       JOURNAL-FILE-ERROR.
+           DISPLAY "JOURNAL FILE ERROR. STATUS: " WS-JOURNAL-STATUS
+           STOP RUN.
+
        DISPLAY-MENU.
            DISPLAY SPACE
-           DISPLAY "****************************************"
-           DISPLAY "*       MEDAKOVIC INVENTORY SYSTEM     *"
-           DISPLAY "*             VERSION 1.3              *"
-           DISPLAY "****************************************"
+           DISPLAY "****************************************************************"
+           DISPLAY "*              MEDAKOVIC INVENTORY SYSTEM                     *"
+           DISPLAY "*                        VERSION 1.4                           *"
+           DISPLAY "****************************************************************"
            DISPLAY SPACE
-           DISPLAY "1. Add new product"
-           DISPLAY "2. Receive stock"
-           DISPLAY "3. Sell product"
-           DISPLAY "4. Display inventory"
-           DISPLAY "5. Low stock report"
-           DISPLAY "6. Inventory valuation report"
-           DISPLAY "7. Export inventory to CSV"
-           DISPLAY "8. Edit product"
-           DISPLAY "9. Archive product"
-           DISPLAY "10. Display archived products"
+           DISPLAY "1. Add new product              7. Export inventory to CSV"
+           DISPLAY "2. Receive stock                8. Edit product"
+           DISPLAY "3. Sell product                 9. Archive product"
+           DISPLAY "4. Display inventory           10. Display archived products"
+           DISPLAY "5. Low stock report            11. Journal - chronological"
+           DISPLAY "6. Inventory valuation         12. Journal - by product ID"
            DISPLAY "0. Exit"
            DISPLAY SPACE
            DISPLAY "ENTER YOUR CHOICE: " WITH NO ADVANCING.
@@ -232,6 +302,7 @@
                    EXIT PARAGRAPH
            END-READ
 
+           INITIALIZE WS-BEFORE-PRODUCT
            INITIALIZE PRODUCT-RECORD
            MOVE WS-INPUT-ID TO PRODUCT-ID
            DISPLAY "PRODUCT NAME: " WITH NO ADVANCING
@@ -248,7 +319,21 @@
                    DISPLAY "PRODUCT COULD NOT BE SAVED. STATUS: "
                            WS-FILE-STATUS
                NOT INVALID KEY
-                   DISPLAY "PRODUCT ADDED SUCCESSFULLY."
+                   MOVE "ADD" TO WS-JOURNAL-ACTION
+                   MOVE "+" TO WS-JOURNAL-CHANGE-SIGN
+                   MOVE PRODUCT-QUANTITY TO WS-JOURNAL-CHANGE
+                   MOVE PRODUCT-UNIT-PRICE TO WS-TRANSACTION-PRICE
+                   MOVE "PRODUCT CREATED" TO WS-JOURNAL-DETAIL
+                   PERFORM WRITE-JOURNAL-ENTRY
+                   IF JOURNAL-WRITE-OK
+                       DISPLAY "PRODUCT ADDED SUCCESSFULLY."
+                   ELSE
+                       DELETE INVENTORY-FILE RECORD
+                           INVALID KEY
+                               CONTINUE
+                       END-DELETE
+                       DISPLAY "PRODUCT ADD ROLLED BACK: JOURNAL ERROR."
+                   END-IF
            END-WRITE.
 
        RECEIVE-STOCK.
@@ -258,6 +343,7 @@
            IF WS-FILE-STATUS NOT = "00"
                EXIT PARAGRAPH
            END-IF
+           MOVE PRODUCT-RECORD TO WS-BEFORE-PRODUCT
            DISPLAY "PRODUCT: " PRODUCT-NAME
            DISPLAY "QUANTITY RECEIVED: " WITH NO ADVANCING
            PERFORM ACCEPT-POSITIVE-NUMBER
@@ -266,15 +352,39 @@
                DISPLAY "QUANTITY WOULD EXCEED THE MAXIMUM OF 999999."
                EXIT PARAGRAPH
            END-IF
+           DISPLAY "RECEIPT UNIT PRICE: " WITH NO ADVANCING
+           PERFORM ACCEPT-TRANSACTION-PRICE
+           COMPUTE PRODUCT-UNIT-PRICE ROUNDED =
+               ((WS-BEFORE-QUANTITY * WS-BEFORE-PRICE) +
+                (WS-AMOUNT * WS-TRANSACTION-PRICE)) /
+               WS-NEW-QUANTITY
            MOVE WS-NEW-QUANTITY TO PRODUCT-QUANTITY
            REWRITE PRODUCT-RECORD
                INVALID KEY
                    DISPLAY "STOCK COULD NOT BE UPDATED. STATUS: "
                            WS-FILE-STATUS
                NOT INVALID KEY
-                   MOVE PRODUCT-QUANTITY TO WS-QUANTITY-DISPLAY
-                   DISPLAY "STOCK RECEIVED. NEW QUANTITY: "
-                           WS-QUANTITY-DISPLAY
+                   MOVE "RECEIVE" TO WS-JOURNAL-ACTION
+                   MOVE "+" TO WS-JOURNAL-CHANGE-SIGN
+                   MOVE WS-AMOUNT TO WS-JOURNAL-CHANGE
+                   MOVE "STOCK RECEIVED AT ENTERED PRICE"
+                       TO WS-JOURNAL-DETAIL
+                   PERFORM WRITE-JOURNAL-ENTRY
+                   IF JOURNAL-WRITE-OK
+                       MOVE PRODUCT-QUANTITY TO WS-QUANTITY-DISPLAY
+                       MOVE PRODUCT-UNIT-PRICE TO WS-PRICE-DISPLAY
+                       DISPLAY "STOCK RECEIVED. NEW QUANTITY: "
+                               WS-QUANTITY-DISPLAY
+                       DISPLAY "NEW AVERAGE UNIT PRICE: "
+                               WS-PRICE-DISPLAY
+                   ELSE
+                       MOVE WS-BEFORE-PRODUCT TO PRODUCT-RECORD
+                       REWRITE PRODUCT-RECORD
+                           INVALID KEY
+                               CONTINUE
+                       END-REWRITE
+                       DISPLAY "STOCK RECEIPT ROLLED BACK: JOURNAL ERROR."
+                   END-IF
            END-REWRITE.
 
        SELL-PRODUCT.
@@ -284,6 +394,7 @@
            IF WS-FILE-STATUS NOT = "00"
                EXIT PARAGRAPH
            END-IF
+           MOVE PRODUCT-RECORD TO WS-BEFORE-PRODUCT
            DISPLAY "PRODUCT: " PRODUCT-NAME
            DISPLAY "QUANTITY TO SELL: " WITH NO ADVANCING
            PERFORM ACCEPT-POSITIVE-NUMBER
@@ -292,15 +403,37 @@
                        PRODUCT-QUANTITY
                EXIT PARAGRAPH
            END-IF
+           MOVE PRODUCT-UNIT-PRICE TO WS-TRANSACTION-PRICE
+           COMPUTE WS-SALE-VALUE = WS-AMOUNT * PRODUCT-UNIT-PRICE
            SUBTRACT WS-AMOUNT FROM PRODUCT-QUANTITY
            REWRITE PRODUCT-RECORD
                INVALID KEY
                    DISPLAY "SALE COULD NOT BE RECORDED. STATUS: "
                            WS-FILE-STATUS
                NOT INVALID KEY
-                   MOVE PRODUCT-QUANTITY TO WS-QUANTITY-DISPLAY
-                   DISPLAY "SALE RECORDED. REMAINING QUANTITY: "
-                           WS-QUANTITY-DISPLAY
+                   MOVE "SELL" TO WS-JOURNAL-ACTION
+                   MOVE "-" TO WS-JOURNAL-CHANGE-SIGN
+                   MOVE WS-AMOUNT TO WS-JOURNAL-CHANGE
+                   MOVE "STOCK SOLD AT AVERAGE PRICE"
+                       TO WS-JOURNAL-DETAIL
+                   PERFORM WRITE-JOURNAL-ENTRY
+                   IF JOURNAL-WRITE-OK
+                       MOVE PRODUCT-QUANTITY TO WS-QUANTITY-DISPLAY
+                       MOVE PRODUCT-UNIT-PRICE TO WS-PRICE-DISPLAY
+                       MOVE WS-SALE-VALUE TO WS-VALUE-DISPLAY
+                       DISPLAY "SALE RECORDED. REMAINING QUANTITY: "
+                               WS-QUANTITY-DISPLAY
+                       DISPLAY "AVERAGE UNIT PRICE USED: "
+                               WS-PRICE-DISPLAY
+                       DISPLAY "SALE VALUE: " WS-VALUE-DISPLAY
+                   ELSE
+                       MOVE WS-BEFORE-PRODUCT TO PRODUCT-RECORD
+                       REWRITE PRODUCT-RECORD
+                           INVALID KEY
+                               CONTINUE
+                       END-REWRITE
+                       DISPLAY "SALE ROLLED BACK: JOURNAL ERROR."
+                   END-IF
            END-REWRITE.
 
        EDIT-PRODUCT.
@@ -310,6 +443,7 @@
            IF WS-FILE-STATUS NOT = "00"
                EXIT PARAGRAPH
            END-IF
+           MOVE PRODUCT-RECORD TO WS-BEFORE-PRODUCT
 
            MOVE PRODUCT-QUANTITY TO WS-QUANTITY-DISPLAY
            MOVE PRODUCT-REORDER-LEVEL TO WS-REORDER-DISPLAY
@@ -346,7 +480,22 @@
                    DISPLAY "PRODUCT COULD NOT BE UPDATED. STATUS: "
                            WS-FILE-STATUS
                NOT INVALID KEY
-                   DISPLAY "PRODUCT UPDATED SUCCESSFULLY."
+                   MOVE "EDIT" TO WS-JOURNAL-ACTION
+                   MOVE SPACE TO WS-JOURNAL-CHANGE-SIGN
+                   MOVE ZERO TO WS-JOURNAL-CHANGE
+                           WS-TRANSACTION-PRICE
+                   MOVE "PRODUCT DETAILS EDITED" TO WS-JOURNAL-DETAIL
+                   PERFORM WRITE-JOURNAL-ENTRY
+                   IF JOURNAL-WRITE-OK
+                       DISPLAY "PRODUCT UPDATED SUCCESSFULLY."
+                   ELSE
+                       MOVE WS-BEFORE-PRODUCT TO PRODUCT-RECORD
+                       REWRITE PRODUCT-RECORD
+                           INVALID KEY
+                               CONTINUE
+                       END-REWRITE
+                       DISPLAY "PRODUCT EDIT ROLLED BACK: JOURNAL ERROR."
+                   END-IF
            END-REWRITE.
 
        ARCHIVE-PRODUCT.
@@ -364,6 +513,7 @@
                DISPLAY "SELL OR OTHERWISE REDUCE STOCK TO ZERO FIRST."
                EXIT PARAGRAPH
            END-IF
+           MOVE PRODUCT-RECORD TO WS-BEFORE-PRODUCT
 
            MOVE PRODUCT-UNIT-PRICE TO WS-PRICE-DISPLAY
            DISPLAY "PRODUCT ID: " PRODUCT-ID
@@ -397,7 +547,28 @@
                    DISPLAY "ACTIVE PRODUCT COULD NOT BE REMOVED. STATUS: "
                            WS-FILE-STATUS
                NOT INVALID KEY
-                   DISPLAY "PRODUCT ARCHIVED SUCCESSFULLY."
+                   MOVE "ARCHIVE" TO WS-JOURNAL-ACTION
+                   MOVE SPACE TO WS-JOURNAL-CHANGE-SIGN
+                   MOVE ZERO TO WS-JOURNAL-CHANGE
+                           WS-TRANSACTION-PRICE
+                   MOVE "ZERO-STOCK PRODUCT ARCHIVED"
+                       TO WS-JOURNAL-DETAIL
+                   PERFORM WRITE-JOURNAL-ENTRY
+                   IF JOURNAL-WRITE-OK
+                       DISPLAY "PRODUCT ARCHIVED SUCCESSFULLY."
+                   ELSE
+                       MOVE WS-BEFORE-PRODUCT TO PRODUCT-RECORD
+                       WRITE PRODUCT-RECORD
+                           INVALID KEY
+                               CONTINUE
+                       END-WRITE
+                       MOVE PRODUCT-ID TO ARCHIVE-PRODUCT-ID
+                       DELETE ARCHIVE-FILE RECORD
+                           INVALID KEY
+                               CONTINUE
+                       END-DELETE
+                       DISPLAY "ARCHIVE ROLLED BACK: JOURNAL ERROR."
+                   END-IF
            END-DELETE.
 
        DISPLAY-ARCHIVE.
@@ -432,6 +603,133 @@
            ELSE
                MOVE WS-PRODUCT-COUNT TO WS-COUNT-DISPLAY
                DISPLAY WS-COUNT-DISPLAY " ARCHIVED PRODUCT(S)."
+           END-IF.
+
+       INITIALIZE-JOURNAL-SEQUENCE.
+           MOVE 1 TO WS-NEXT-JOURNAL-SEQUENCE
+           PERFORM START-JOURNAL-FROM-BEGINNING
+           PERFORM UNTIL END-OF-FILE
+               READ JOURNAL-FILE NEXT RECORD
+                   AT END
+                       SET END-OF-FILE TO TRUE
+                   NOT AT END
+                       COMPUTE WS-NEXT-JOURNAL-SEQUENCE =
+                           JOURNAL-SEQUENCE + 1
+               END-READ
+           END-PERFORM.
+
+       WRITE-JOURNAL-ENTRY.
+           MOVE "N" TO WS-JOURNAL-WRITE-OK
+           INITIALIZE JOURNAL-RECORD
+           MOVE WS-NEXT-JOURNAL-SEQUENCE TO JOURNAL-SEQUENCE
+           MOVE FUNCTION CURRENT-DATE(1:14) TO JOURNAL-TIMESTAMP
+           MOVE PRODUCT-ID TO JOURNAL-PRODUCT-ID
+           MOVE WS-JOURNAL-ACTION TO JOURNAL-ACTION
+           MOVE WS-BEFORE-QUANTITY TO JOURNAL-QTY-BEFORE
+           MOVE WS-JOURNAL-CHANGE-SIGN TO JOURNAL-QTY-CHANGE-SIGN
+           MOVE WS-JOURNAL-CHANGE TO JOURNAL-QTY-CHANGE
+           MOVE PRODUCT-QUANTITY TO JOURNAL-QTY-AFTER
+           MOVE WS-BEFORE-NAME TO JOURNAL-NAME-BEFORE
+           MOVE PRODUCT-NAME TO JOURNAL-NAME-AFTER
+           MOVE WS-BEFORE-REORDER TO JOURNAL-REORDER-BEFORE
+           MOVE PRODUCT-REORDER-LEVEL TO JOURNAL-REORDER-AFTER
+           MOVE WS-BEFORE-PRICE TO JOURNAL-PRICE-BEFORE
+           MOVE WS-TRANSACTION-PRICE TO JOURNAL-TRANSACTION-PRICE
+           MOVE PRODUCT-UNIT-PRICE TO JOURNAL-PRICE-AFTER
+           MOVE WS-JOURNAL-DETAIL TO JOURNAL-DETAIL
+           WRITE JOURNAL-RECORD
+               INVALID KEY
+                   DISPLAY "JOURNAL WRITE FAILED. STATUS: "
+                           WS-JOURNAL-STATUS
+               NOT INVALID KEY
+                   SET JOURNAL-WRITE-OK TO TRUE
+                   ADD 1 TO WS-NEXT-JOURNAL-SEQUENCE
+           END-WRITE.
+
+       DISPLAY-JOURNAL-CHRONOLOGICAL.
+           DISPLAY SPACE
+           DISPLAY "--- CHANGE JOURNAL - CHRONOLOGICAL ---"
+           MOVE ZERO TO WS-JOURNAL-MATCH-COUNT
+           PERFORM START-JOURNAL-FROM-BEGINNING
+           PERFORM UNTIL END-OF-FILE
+               READ JOURNAL-FILE NEXT RECORD
+                   AT END
+                       SET END-OF-FILE TO TRUE
+                   NOT AT END
+                       ADD 1 TO WS-JOURNAL-MATCH-COUNT
+                       PERFORM DISPLAY-JOURNAL-ENTRY
+               END-READ
+           END-PERFORM
+           PERFORM DISPLAY-JOURNAL-COUNT.
+
+       DISPLAY-JOURNAL-BY-PRODUCT.
+           DISPLAY SPACE
+           DISPLAY "--- CHANGE JOURNAL - BY PRODUCT ID ---"
+           PERFORM ACCEPT-PRODUCT-ID
+           MOVE ZERO TO WS-JOURNAL-MATCH-COUNT
+           PERFORM START-JOURNAL-FROM-BEGINNING
+           PERFORM UNTIL END-OF-FILE
+               READ JOURNAL-FILE NEXT RECORD
+                   AT END
+                       SET END-OF-FILE TO TRUE
+                   NOT AT END
+                       IF JOURNAL-PRODUCT-ID = WS-INPUT-ID
+                           ADD 1 TO WS-JOURNAL-MATCH-COUNT
+                           PERFORM DISPLAY-JOURNAL-ENTRY
+                       END-IF
+               END-READ
+           END-PERFORM
+           PERFORM DISPLAY-JOURNAL-COUNT.
+
+       START-JOURNAL-FROM-BEGINNING.
+           MOVE "N" TO WS-END-OF-FILE
+           MOVE ZERO TO JOURNAL-SEQUENCE
+           START JOURNAL-FILE KEY IS NOT LESS THAN JOURNAL-SEQUENCE
+               INVALID KEY
+                   SET END-OF-FILE TO TRUE
+           END-START.
+
+       DISPLAY-JOURNAL-ENTRY.
+           MOVE JOURNAL-QTY-BEFORE TO WS-QTY-BEFORE-DISPLAY
+           MOVE JOURNAL-QTY-CHANGE TO WS-QTY-CHANGE-DISPLAY
+           MOVE JOURNAL-QTY-AFTER TO WS-QTY-AFTER-DISPLAY
+           MOVE JOURNAL-REORDER-BEFORE TO WS-REORDER-BEFORE-DISPLAY
+           MOVE JOURNAL-REORDER-AFTER TO WS-REORDER-AFTER-DISPLAY
+           MOVE JOURNAL-PRICE-BEFORE TO WS-PRICE-BEFORE-DISPLAY
+           MOVE JOURNAL-TRANSACTION-PRICE TO WS-TRANSACTION-DISPLAY
+           MOVE JOURNAL-PRICE-AFTER TO WS-PRICE-AFTER-DISPLAY
+           DISPLAY SPACE
+           DISPLAY "#" JOURNAL-SEQUENCE "  "
+                   JOURNAL-TIMESTAMP(1:4) "-"
+                   JOURNAL-TIMESTAMP(5:2) "-"
+                   JOURNAL-TIMESTAMP(7:2) " "
+                   JOURNAL-TIMESTAMP(9:2) ":"
+                   JOURNAL-TIMESTAMP(11:2) ":"
+                   JOURNAL-TIMESTAMP(13:2) "  "
+                   JOURNAL-PRODUCT-ID "  " JOURNAL-ACTION
+           DISPLAY "  QTY: " WS-QTY-BEFORE-DISPLAY " "
+                   JOURNAL-QTY-CHANGE-SIGN WS-QTY-CHANGE-DISPLAY
+                   " -> " WS-QTY-AFTER-DISPLAY
+           DISPLAY "  AVG: " WS-PRICE-BEFORE-DISPLAY
+                   " -> " WS-PRICE-AFTER-DISPLAY
+                   "  TRANSACTION: " WS-TRANSACTION-DISPLAY
+           IF JOURNAL-NAME-BEFORE NOT = JOURNAL-NAME-AFTER
+               DISPLAY "  NAME: " JOURNAL-NAME-BEFORE
+                       " -> " JOURNAL-NAME-AFTER
+           END-IF
+           IF JOURNAL-REORDER-BEFORE NOT = JOURNAL-REORDER-AFTER
+               DISPLAY "  REORDER: " WS-REORDER-BEFORE-DISPLAY
+                       " -> " WS-REORDER-AFTER-DISPLAY
+           END-IF
+           DISPLAY "  " JOURNAL-DETAIL.
+
+       DISPLAY-JOURNAL-COUNT.
+           IF WS-JOURNAL-MATCH-COUNT = ZERO
+               DISPLAY "NO JOURNAL ENTRIES FOUND."
+           ELSE
+               MOVE WS-JOURNAL-MATCH-COUNT TO WS-COUNT-DISPLAY
+               DISPLAY SPACE
+               DISPLAY WS-COUNT-DISPLAY " JOURNAL ENTRY/ENTRIES."
            END-IF.
 
        DISPLAY-INVENTORY.
@@ -720,6 +1018,25 @@
                    END-IF
                END-IF
            END-PERFORM.
+
+       ACCEPT-TRANSACTION-PRICE.
+           MOVE SPACES TO WS-INPUT
+           PERFORM UNTIL FUNCTION TEST-NUMVAL(WS-INPUT) = ZERO
+               ACCEPT WS-INPUT
+               IF FUNCTION TEST-NUMVAL(WS-INPUT) NOT = ZERO
+                   DISPLAY "ENTER A VALID PRICE (0.00 TO 9999999.99): "
+                           WITH NO ADVANCING
+               ELSE
+                   IF FUNCTION NUMVAL(WS-INPUT) < ZERO OR
+                      FUNCTION NUMVAL(WS-INPUT) > 9999999.99
+                       DISPLAY "ENTER A VALID PRICE (0.00 TO 9999999.99): "
+                               WITH NO ADVANCING
+                       MOVE SPACES TO WS-INPUT
+                   END-IF
+               END-IF
+           END-PERFORM
+           COMPUTE WS-TRANSACTION-PRICE ROUNDED =
+               FUNCTION NUMVAL(WS-INPUT).
 
        ACCEPT-POSITIVE-NUMBER.
            MOVE SPACES TO WS-INPUT
