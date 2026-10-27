@@ -1,0 +1,26 @@
+# Compiled binaries and objects
+*.exe
+*.dll
+*.o
+*.obj
+*.so
+*.dylib
+
+# Runtime inventory databases and backups
+inventory.dat
+inventory-archive.dat
+inventory-before-reindex.dat
+inventory-*.bak
+
+# Generated exports
+inventory.csv
+
+# COBOL compiler/debug artifacts
+*.lst
+*.idy
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
